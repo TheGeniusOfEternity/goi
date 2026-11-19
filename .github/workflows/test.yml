@@ -1,0 +1,18 @@
+name: Test GOI
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  service:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Service and HTTP adapter tests (no GitHub credentials)
+        run: make test
+      # Kernel integration uses the matching Linux 7.0 VM/QEMU separately.

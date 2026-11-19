@@ -1,45 +1,50 @@
 # GOI
 
-**GitHub как файловая система Linux.** Открывай репозитории обычным редактором,
-сохраняй файлы и публикуй изменения командой `goi commit`.
+**GitHub repositories as a Linux filesystem.**
 
-GOI — экспериментальный проект: модуль ядра Linux на C, локальный или удалённый
-сервис на Python и CLI. Сервис хранит рабочее состояние в SQLite и общается с
-GitHub API. Сторонние Python-библиотеки не нужны.
+Browse repositories as directories, edit files with your usual tools, and publish
+changes with `goi commit`. GOI combines a Linux kernel module written in C with
+a Python storage service and command-line interface.
 
-## Возможности
 
-- Авторизация в браузере через GitHub Device Flow.
-- Пользователи и организации на одном уровне, репозитории и ветки как каталоги.
-- Явная активация репозитория; файлы скачиваются по мере обращения.
-- Чтение, запись, создание, удаление и переименование через обычные файловые операции.
-- `fsync` и autosync сохраняют изменения на сервисе; `goi commit` публикует
-  выбранные файлы одним GitHub-коммитом.
-- Трёхстороннее слияние, отдельные конфликтные копии, restore и refresh.
-- Клиентский журнал на диске, восстановление незавершённой публикации, ограничение кеша.
-- `.goiignore`, просмотр изменений, переключение веток через shell-интеграцию.
-- Фоновый локальный сервис через пользовательский systemd.
+## Features
 
-## Как устроено
+- **Browser authentication** through GitHub OAuth Device Flow.
+- **Lazy loading:** activate a repository explicitly, then fetch directory
+  listings and file contents as they are accessed.
+- **Branches as directories**, with users and organizations at the same level.
+- **Regular filesystem operations:** read, write, create, delete, and rename files.
+- **Separate saving and publishing:** `fsync` and autosync save working changes
+  to the service; `goi commit` publishes selected changes as one GitHub commit.
+- **Conflict handling:** three-way text merging and separate conflict files
+  that preserve the working file until resolution.
+- **Local recovery:** a persistent client write journal and recovery of
+  interrupted GitHub publications.
+- **Bounded caches**, ignore rules, change inspection, and restore commands.
+- **Background operation** through a per-user systemd service.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  Editor["Редактор / cat / mv"] --> VFS["Linux VFS"]
-  VFS --> Module["vtfs.ko — C"]
-  Module --> RAM["Page cache"]
-  Module --> Journal["Локальный журнал — SQLite"]
-  Module -->|HTTP: чтение, fsync| Server["GOI service — Python"]
-  CLI["goi CLI"] -->|auth / commit / refresh| Server
-  Server --> DB["Рабочее состояние — SQLite"]
-  Server -->|HTTPS API| GitHub["GitHub"]
+    App["Editor / cat / mv"] --> VFS["Linux VFS"]
+    VFS --> Module["vtfs.ko — C"]
+    Module --> Cache["Kernel page cache"]
+    Module --> Journal["Local write journal — SQLite"]
+    Module -->|HTTP: read / fsync| Service["GOI service — Python"]
+    CLI["goi CLI"] -->|auth / commit / refresh| Service
+    Service --> Database["Working state — SQLite"]
+    Service -->|HTTPS API| GitHub["GitHub"]
 ```
 
-Успешная запись подтверждается клиентским журналом. `fsync` переносит её в
-основной сервис. Публикация на GitHub происходит отдельно, через `goi commit`.
-У каждого пользователя на своей машине может работать собственный сервис
-с отдельной базой и авторизацией.
+With journaling enabled, a successful write is recorded in the local client
+journal. `fsync` transfers the file to the main service, which stores working
+state in SQLite. Publishing to GitHub is a separate, explicit operation.
 
-Пример дерева:
+The service can run locally in the background or on another machine. Each user
+can run an independent local instance with their own database and authentication.
+
+## Filesystem layout
 
 ```text
 ~/github/
@@ -54,55 +59,62 @@ flowchart LR
     └── another-repo/
 ```
 
-## Быстрый старт
+Branch names containing slashes are encoded, for example
+`feature/example` becomes `feature%2Fexample`.
 
-Проверенная среда: Ubuntu ARM64, Linux **7.0.0-43-generic**, Python **3.14**.
-Python-компоненты требуют Python 3.10+. Для сборки нужны GCC, make и заголовки
-ядра. VFS API зависит от версии Linux: для другого ядра может понадобиться
-адаптация. Запускайте модуль в отдельной VM.
+## Quick start
+
+The verified environment is Ubuntu ARM64 with Linux **7.0.0-43-generic**
+and Python **3.14**. Python components require Python 3.10+ and use the standard
+library. Building the kernel module requires GCC, make, and matching kernel
+headers. Other kernel versions may require VFS API changes.
+
+Use a dedicated Linux VM for kernel module testing.
 
 ```bash
 git clone https://github.com/TheGeniusOfEternity/goi.git
 cd goi
+
 make W=1
 export PATH="$PWD/bin:$PATH"
 source "$PWD/shell/goi.sh"
 sudo insmod source/vtfs.ko
 ```
 
-В GitHub создайте OAuth App, включите **Enable Device Flow**, возьмите Client ID.
-Client secret для Device Flow не нужен.
+Create a GitHub OAuth App, enable **Device Flow**, and obtain its Client ID.
+A client secret is not required for this authentication flow.
 
 ```bash
-# Один раз:
+# One-time local service setup:
 goi service install --client-id YOUR_CLIENT_ID
 
-# Mount сам запускает локальный сервер:
+# Mount starts the local service if needed:
 goi mount ~/github
 goi auth ~/github
 
+# Use an existing repository with at least one commit:
 goi activate ~/github/YOUR_LOGIN/YOUR_REPO
 cd ~/github/YOUR_LOGIN/YOUR_REPO/main
+
 cat README.md
-```
-
-Вместо YOUR_LOGIN/YOUR_REPO укажите свой тестовый репозиторий с хотя бы одним
-коммитом. Путь точки монтирования произвольный.
-
-```bash
 printf '\nHello from GOI\n' >> README.md
 goi status
 goi diff
 goi commit README.md -m "Update README"
+```
 
+Replace the login, repository, and branch with your own values.
+`goida` is shorthand for `goi commit`. Without explicit paths, commit selects
+all non-ignored pending changes in the branch.
+
+When finished:
+
+```bash
 cd ~
 goi unmount ~/github
 ```
 
-`goida` — короткая форма `goi commit`. Без списка путей публикуются все
-неигнорируемые изменения ветки. До авторизации просмотр корня запрещён.
-
-## Фоновый сервис
+## Background service
 
 ```bash
 goi service status
@@ -110,49 +122,60 @@ goi service restart
 journalctl --user -u goi -f
 ```
 
-Unit запускается при входе пользователя и перезапускается после аварии.
-Данные по умолчанию находятся в `~/.local/share/goi`.
-Unit хранит абсолютный путь к checkout: после перемещения проекта повторите
-`goi service install --client-id YOUR_CLIENT_ID` и перезапустите сервис.
+The user service starts at login and restarts after failure. Its default data
+directory is `~/.local/share/goi`. The unit stores the absolute checkout path;
+after moving the source directory, repeat installation with the Client ID and
+restart the service.
 
-Удалённый или вручную запущенный сервер задаётся явно:
+To use a manually managed or remote backend, pass its address and session token:
 
 ```bash
 goi mount ~/github --server http://127.0.0.1:8080 \
   --token-file /path/to/server-token
 ```
 
-Эти настройки сохраняются для следующих mount. Для удалённого сервера используйте
-доверенную сеть или SSH-туннель: транспорт между ядром и сервисом — HTTP.
-Основной сервис рассчитан на одного писателя рабочего состояния, а не на
-изолированные рабочие пространства нескольких пользователей.
+These settings are saved for subsequent mounts. Remote connections require a
+trusted network or an SSH tunnel: the kernel-to-service protocol uses HTTP.
 
-## Документация
+## Testing
 
-- [Подробный запуск и команды](DEVELOPMENT.md)
-- [Путь файла от mount до commit](WALKTHROUGH.md)
-- [Интерактивный конспект](docs/goi-guide.html) — скачать и открыть в браузере
-- [HTTP-протокол](PROTOCOL.md)
-- [Разработка и тесты](CONTRIBUTING.md)
-- [История изменений](CHANGELOG.md)
-- [Происхождение исходников и лицензирование](NOTICE.md)
-
-## Проверки и ограничения
+From the repository root:
 
 ```bash
 make test
 make W=1
 ```
 
-В наборе 68 Python-тестов с подставным GitHub API. Для проверки модуля есть
-`test/run-vm-tests.sh` и ARM64 QEMU runner `test/run_qemu.py`, включая
-сценарий восстановления после аварии. Подробности — в DEVELOPMENT.md.
-CI запускает Python-тесты; модуль требует отдельной совместимой VM.
+The suite contains **68 Python tests** using a controlled GitHub API fixture.
+Kernel integration tests run separately in a compatible VM. The ARM64 QEMU
+runner also supports a crash-and-recovery scenario with a persistent virtual disk.
 
-Файл ограничен 64 МиБ. Полного offline-режима, создания веток и первого коммита
-пустого репозитория пока нет. Обычный Git внутри GOI блокируется: используйте CLI GOI.
-После refresh/restore/resolve рабочие файлы нужно переоткрывать.
-Квота page cache не включает метаданные и временные буферы.
+## Current limitations
 
-Проект вырос из лабораторной VTFS; исходная учебная версия остаётся в
-[os-course](https://github.com/TheGeniusOfEternity/os-course/tree/lab-vtfs/lab/vtfs).
+- Experimental kernel module; compatibility across Linux versions is not guaranteed.
+- One writer per working state; the service does not provide isolated workspaces
+  for multiple simultaneous users.
+- Maximum file size: 64 MiB.
+- No complete offline mode: directory operations require the main service.
+- Creating branches and publishing the first commit of an empty repository
+  are not supported yet.
+- Ordinary Git commands inside the mount are blocked; use GOI commands.
+- Reopen working files after refresh, restore, or conflict resolution.
+- The page-cache quota does not include metadata or temporary buffers.
+
+## Background and documentation
+
+GOI originated in the VTFS lab of the
+[os-course repository](https://github.com/TheGeniusOfEternity/os-course).
+The original template attribution and SPDX notices are retained in the source.
+
+Project documentation, code comments, and contributions are maintained in English.
+
+- [Setup and command reference](DEVELOPMENT.md)
+- [From mount to commit](WALKTHROUGH.md)
+- [HTTP protocol](PROTOCOL.md)
+- [Interactive architecture guide](docs/goi-guide.html)
+
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [Source provenance and licensing](NOTICE.md)

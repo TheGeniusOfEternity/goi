@@ -1,202 +1,190 @@
-# Как работает GOI: от mount до commit
+# From mount to commit
 
-В работе участвуют три программы:
+See the [interactive guide](docs/goi-guide.html) for a navigable diagram and source excerpts.
 
-- **Модуль `vtfs.ko` на C** объясняет ядру Linux, как работать с нашей ФС.
-- **Сервис на Python** хранит рабочие файлы в SQLite и обращается к GitHub.
-- **Команда `goi`** выполняет вход, активацию репозитория и публикацию коммитов.
+## 1. Build and load
 
-Приложения вроде `cat` и редактора ничего не знают про GOI. Они вызывают обычные
-системные вызовы Linux. VFS — общая часть ядра, которая направляет эти вызовы
-в обработчики нужной файловой системы.
+Build the module against matching kernel headers. insmod loads its code and calls vtfs_init, which registers the vtfs filesystem type. It does not create a mount.
 
-## 1. Mount: подключаем файловую систему
+```bash
+make W=1
+sudo insmod source/vtfs.ko
+```
 
-Сначала `insmod` загружает модуль, а `vtfs_init` регистрирует имя `vtfs`.
-Затем `goi mount /github` проверяет локальный сервис и при необходимости
-запускает его через пользовательский systemd (`goi/service.py: ensure`).
-После готовности сервера CLI вызывает `mount -t vtfs`.
-Разовая настройка: `goi service install --client-id ID`.
-При явном или сохранённом удалённом адресе локальный сервер не запускается.
-Перед этим CLI создаёт каталог точки монтирования; при нехватке прав использует
-sudo mkdir. Для создания /github отдельная ручная команда не требуется.
-Нужно указать только путь: goi mount /github или goi mount ~/github. Адрес,
-токен и интервал синхронизации берутся из сохранённых настроек этого пути;
-при первом запуске используются localhost:8080, стандартный server-token и 1 с.
-Флаги позволяют изменить эти параметры и сохранить их для следующего mount.
+Implementation: [source/vtfs.c](source/vtfs.c). Start at `vtfs_init`.
 
-Ядро создаёт контекст монтирования через `vtfs_init_fs_context`, разбирает адрес
-сервиса и вызывает `vtfs_get_tree` → `vtfs_remote_fill_super`. Здесь создаётся
-`super_block` — описание одного монтирования. Через HTTP `hello` модуль получает
-корень ФС и создаёт для него `inode` и `dentry`. Теперь существует каталог `/github`.
+## 2. Start the service
 
-`inode` содержит тип, размер, права и номер объекта. `dentry` связывает имя с inode.
-Содержимое файла хранится отдельно, в страницах памяти ядра.
+The local Python server opens SQLite and exposes HTTP. The user systemd unit starts at login and restarts after failure. Mount can start it on demand and waits for authenticated readiness.
 
-## 2. Auth и activate: получаем дерево репозиториев
+```bash
+goi service install --client-id YOUR_CLIENT_ID
+goi service status
+```
 
-`goi auth /github` запускает Device Flow: сервис получает код GitHub, пользователь
-подтверждает вход в браузере, сервис сохраняет access token. В `/github` появляется
-каталоги пользователя и его организаций прямо в корне; внутри каждого — репозитории.
+Implementation: [goi/service.py](goi/service.py), [goi/server.py](goi/server.py), [goi/storage.py](goi/storage.py). Start at `ensure`.
 
-До первого успешного входа сервис запрещает list и lookup корня с EACCES:
-ls /github сообщает Permission denied. Запрос hello при mount и команды
-авторизации продолжают работать. После появления аккаунта ограничение снимается.
+## 3. Mount
 
-`goi activate /github/user/repo` получает ветки репозитория. Внутри
-`main` лежат файлы ветки main. На этом этапе содержимое файлов не скачано.
-Из самой папки репозитория можно выполнить просто `goi activate` или `goi active`.
+The CLI prepares the mountpoint, main service and client journal, then invokes mount. VFS builds a filesystem context; get_tree calls fill_super. HTTP hello returns the root object metadata.
 
-## 3. Lookup: находим объект по имени
+```bash
+goi mount ~/github
+```
 
-Для пути `/github/user/repo/main/README.md` ядру нужно найти каждый
-компонент. VFS вызывает `goi_lookup`, он отправляет HTTP `lookup(parent, name)`.
-Сервис ищет объект в SQLite; если нужный каталог ещё не загружен, получает его
-список из GitHub. Модуль создаёт inode найденного объекта и связывает его с именем.
+Implementation: [goi/cli.py](goi/cli.py), [source/vtfs.c](source/vtfs.c), [source/remote.c](source/remote.c). Start at `main`.
 
-`ls` идёт другим путём: вызывает `goi_iterate`, который получает список имён через
-HTTP `list`. Поиск имён и чтение содержимого файла — разные операции.
+## 4. Authenticate
 
-## 4. Open/read: скачиваем один файл
+Device Flow displays a code and a browser URL. After approval, the service stores the GitHub token and exposes owner directories. Before login, root listing is denied.
 
-При открытии README вызывается `goi_open` → `goi_load`. Модуль читает файл с сервиса
-порциями по 32 КиБ. `Store.read` при необходимости скачивает GitHub blob и сохраняет
-его в SQLite. Модуль кладёт полученные байты в page cache — кеш файловых данных ядра.
+```bash
+goi auth ~/github
+```
 
-После этого `generic_file_read_iter` отдаёт байты из page cache приложению.
-Флаг `loaded` говорит, что файл уже загружен. Остальные файлы не скачиваются.
+Implementation: [goi/cli.py](goi/cli.py), [goi/server.py](goi/server.py), [goi/github.py](goi/github.py). Start at `device_start`.
 
-## 5. Write: меняем RAM и сохраняем клиентский журнал
+## 5. Activate a repository
 
-Например, редактор записывает новую строку в README. Вызов попадает в
-`goi_write_iter`. Стандартный обработчик ядра меняет страницы page cache,
-а наш код ставит `dirty = true`: локальная копия требует отправки сервису.
+Explicit activation retrieves branches. Each branch is a directory. Other repositories remain inactive; directory discovery does not eagerly fetch every blob.
 
-При обычном goi mount перед ответом write вызывается goi_journal: полный снимок
-файла отправляется локальному Python-процессу и фиксируется в отдельной SQLite.
-При создании нового файла имя сразу создаётся на основном сервисе, содержимое
-отправляется туда через fsync. С --no-journal до fsync содержимое остаётся только в RAM.
+```bash
+goi activate ~/github/YOUR_LOGIN/YOUR_REPO
+```
 
-## 6. Fsync: сохраняем файл на сервисе
+Implementation: [goi/storage.py](goi/storage.py), [goi/server.py](goi/server.py). Start at `activate`.
 
-```sh
+## 6. Look up and list
+
+VFS resolves path components using lookup. The server loads directory metadata when needed. Listing uses iterate rather than reading file contents.
+
+```bash
+cd ~/github/YOUR_LOGIN/YOUR_REPO/main
+ls
+```
+
+Implementation: [source/remote.c](source/remote.c), [goi/storage.py](goi/storage.py). Start at `goi_lookup`.
+
+## 7. Open and read
+
+The module loads a file into page cache. The service fetches its GitHub blob if it is not cached. HTTP transfers data in bounded chunks; generic_file_read_iter returns bytes to the application.
+
+```bash
+cat README.md
+```
+
+Implementation: [source/remote.c](source/remote.c), [goi/storage.py](goi/storage.py), [goi/github.py](goi/github.py). Start at `goi_load`.
+
+## 8. Write and journal
+
+A write changes cached file contents. With journaling enabled, the full snapshot is committed to the local SQLite journal before write succeeds. This protects content before the main service has acknowledged fsync.
+
+```bash
+printf '\nHello from GOI\n' >> README.md
+```
+
+Implementation: [source/remote.c](source/remote.c), [goi/journal.py](goi/journal.py). Start at `goi_write_iter`.
+
+## 9. Fsync and autosync
+
+Fsync sends the complete file to the main service, waits for SQLite commit, and acknowledges the journal. Autosync schedules the same kind of saving through delayed work. Saving is separate from publication.
+
+```bash
 goi sync README.md
 ```
 
-CLI открывает файл и вызывает `os.fsync(fd)`. Ядро вызывает `goi_fsync`, а тот —
-`goi_sync_inode`. Эта функция копирует целый файл из page cache в буфер и делает
-**один HTTP POST `write` с байтами файла**.
+Implementation: [source/remote.c](source/remote.c), [goi/server.py](goi/server.py), [goi/storage.py](goi/storage.py). Start at `goi_fsync`.
 
-Сервис полностью читает запрос, `Store.write` обновляет файл в SQLite, HTTP-обработчик
-вызывает `db.commit()` и только после успеха отвечает ядру. Модуль подтверждает локальному журналу сохранение, удаляет его запись и снимает dirty-флаг.
-Если запрос не удался, fsync возвращает ошибку и локальные страницы остаются в RAM.
-После восстановления связи можно повторить `goi sync`: файл целиком заменится снова.
+## 10. Inspect changes
 
-По умолчанию раз в секунду ту же функцию вызывает фоновый обработчик. Он не создаёт
-другого способа сохранения. Явный fsync нужен, чтобы дождаться результата.
+Status and diff compare service working state against the recorded baseline. The kernel dirty flag tracks unsaved bytes; service changes track unpublished edits. Ignore rules affect only new unpublished objects.
 
-## 7. Commit: отправляем сохранённые изменения на GitHub
-
-```sh
-goi commit README.md -m 'Update README'
+```bash
+goi status
+goi diff
 ```
 
-CLI сначала делает fsync выбранного файла, записывает сообщение в скрытый файл
-`.goi/commit/message` и тоже синхронизирует его. Затем отправляет сервису команду
-`commit`. Функция `publish.commit` проверяет изменения на GitHub, создаёт blob,
-дерево и коммит, затем обновляет ветку без force push.
+Implementation: [goi/cli.py](goi/cli.py), [goi/publish.py](goi/publish.py), [goi/ignore.py](goi/ignore.py). Start at `status`.
 
-В одном вызове можно перечислить несколько файлов. Каждый сохраняется на сервисе
-своим fsync, а на GitHub они попадают в один коммит. Без списка выбираются все изменения.
+## 11. Publish a commit
 
-Для существующего файла с исходным содержимым «старое»:
+Commit synchronizes pending writes, checks the remote branch, creates Git objects, and updates its ref without force. Publication intent is persisted before updating the ref so an uncertain result can be recovered.
 
-| После операции | RAM клиента | SQLite сервиса | GitHub |
-|---|---|---|---|
-| write «новое» | новое | старое | старое |
-| fsync | новое | новое | старое |
-| goi commit | новое | новое | новое |
+```bash
+goi commit README.md -m "Update README"
+```
 
-У ядра dirty означает **«ещё не сохранено на сервисе»**. У строки в SQLite dirty
-означает **«ещё не опубликовано на GitHub»**. Это два разных этапа сохранения.
+Implementation: [goi/publish.py](goi/publish.py), [goi/github.py](goi/github.py), [goi/recovery.py](goi/recovery.py). Start at `commit`.
 
-## Ошибки и конфликты
+## 12. Resolve conflicts
 
-Независимые изменения строк объединяются автоматически. При пересечении правок
-сервис создаёт отдельную копию с маркерами
-в `.goi/commit/changes/README.md`. Рабочий README остаётся прежним. Пользователь
-редактирует конфликтную копию, делает fsync и подтверждает её через `goi resolve`.
-После этого нужно переоткрыть README и выполнить commit.
+Independent text edits can merge. Ambiguous changes create a separate conflict copy. Edit that copy and resolve it before reopening the working file and publishing. The working file is preserved until resolution.
 
-Намерение публикации сохраняется в таблице publications до обновления GitHub ref.
-После перезапуска или при `goi recover` сервис проверяет, был ли опубликован
-сохранённый SHA, и повторяет только недостающее обновление ref. Следующие локальные
-правки при этом не сбрасываются. Неоднозначные случаи требуют проверки GitHub
-и явного `goi recover --forget`; детали — в DEVELOPMENT.md.
+```bash
+$EDITOR .goi/commit/changes/README.md
+goi sync .goi/commit/changes/README.md
+goi resolve README.md
+```
 
-`goi restore <путь>` отменяет выбранные изменения до записанной исходной версии.
-`goi refresh` обновляет чистые файлы и объединяет независимые правки; локальные
-каталоги сохраняются. После обеих команд нужно переоткрыть затронутые файлы.
+Implementation: [goi/merge.py](goi/merge.py), [goi/publish.py](goi/publish.py). Start at `resolve`.
 
-Для лабы предполагается один клиент, редактирующий рабочую копию. Несколько
-клиентов одного файла не объединяются автоматически: последняя сохранённая копия
-заменяет предыдущую.
+## 13. Refresh and restore
 
-## Переключение ветки из shell
+Refresh updates clean files and merges changes while preserving locally changed directory subtrees. Restore discards selected changes back to the baseline. Reopen affected files after either operation.
 
-Один раз подключается `source /путь/к/./shell/goi.sh`. Файл определяет
-функции cd и goi для Bash/Zsh. Обёртка cd сначала проверяет путь в дочернем shell,
-затем вызывает goi switch --from-cd для найденного каталога. Если это каталог внутри ветки,
-CLI открывает корень ветки и вызывает ioctl 0x4702. Само ядро не распознаёт команды
-shell: lookup может быть вызван и редактором, и автодополнением.
+```bash
+goi refresh
+goi restore README.md
+```
 
-Модуль синхронизирует файлы и запоминает номер активной ветки. Для файлов других
-веток goi_drop_cache удаляет страницы и сбрасывает loaded, если файл сохранён
-и закрыт. Счётчик opens учитывает открытые файлы; mmap удерживает ссылку на файл
-до закрытия отображения. При закрытии последней ссылки кеш неактивной ветки
-тоже может быть освобождён. Следующий open снова вызывает goi_load.
+Implementation: [goi/workspace.py](goi/workspace.py), [goi/storage.py](goi/storage.py). Start at `restore`.
 
-После успеха обёртка выполняет builtin cd в исходно запрошенный путь. Команда
-goi switch работает через тот же ioctl, печатает корень ветки, а shell-функция
-выполняет builtin cd в него. Без обёртки внешний процесс не меняет каталог shell.
-При сетевой ошибке данные остаются в RAM и builtin cd не выполняется.
+## 14. Switch and recover
 
-## Что происходит внутри HTTP-клиента
+The shell cd wrapper synchronizes branch transitions and releases eligible caches. Open and dirty files remain protected. Journal replay checks revisions before restoring data; ambiguous snapshots can be exported.
 
-`source/http.c` следует структуре выданного шаблона:
+```bash
+goi switch main
+goi journal status
+goi journal export --output ~/goi-rescue
+```
 
-1. `fill_request` собирает HTTP-заголовок.
-2. `vtfs_http_call` подключает kernel socket и отправляет запрос через `send_all`.
-3. `receive_all` читает ответ до закрытия соединения сервером.
-4. `parse_http_response` разбирает заголовки и копирует данные ответа.
-5. `encode` кодирует специальные символы в URL; `vtfs_url_encode` выделяет ей буфер.
+Implementation: [shell/goi.sh](shell/goi.sh), [goi/cli.py](goi/cli.py), [goi/journal.py](goi/journal.py). Start at `switch_branch`.
 
-Дополнения к шаблону: адрес из настроек mount, POST для записи, таймауты,
-проверки границ и цикл отправки на случай неполного send. Вместо varargs функция
-получает уже собранную строку параметров `query`; для POST отдельно передаются
-байты файла. `received` нужен вызывающему коду для проверки длины ответа.
+## 15. Unmount and unload
 
-## В каком порядке читать исходники
+Unmount synchronizes before releasing the filesystem instance. Open references can prevent it. rmmod unloads the filesystem type only after mounts are gone. The main service and its SQLite data remain independent.
 
-1. `source/vtfs.c`: регистрация ФС, контекст mount и таблицы операций.
-2. `source/remote.c`: `goi_lookup`, `goi_open`, `goi_load`, `goi_write_iter`, `goi_sync_inode`.
-3. `goi/server.py`: HTTP-методы `read` и `write`, место вызова `db.commit()`.
-4. `goi/storage.py`: `read` и `write`; схема таблиц — в `goi/schema.sql`.
-5. `goi/publish.py`: отдельная команда `commit` и работа с конфликтами.
+```bash
+cd ~
+goi unmount ~/github
+sudo rmmod vtfs
+```
 
-Не нужно заучивать все функции сразу: сначала проследи один файл по этим пяти пунктам.
+Implementation: [goi/cli.py](goi/cli.py), [source/remote.c](source/remote.c), [source/vtfs.c](source/vtfs.c). Start at `vtfs_exit`.
 
-## Квота, исключения и восстановление клиента
+## Glossary
 
-`goi_reserve` резервирует память до загрузки/расширения файла. Чистые закрытые
-копии можно вытеснить; открытые и dirty-файлы защищены. Если квоты недостаточно,
-возвращается ENOSPC. Квота не включает inode/dentry и временные HTTP-буферы.
+**inode:** A kernel object describing a filesystem object: ID, type, permissions, timestamps, operations, and mapping to cached content. The filename is represented separately.
 
-`goi/ignore.py` применяет правила `.goiignore` только к новым файлам.
-`goi accounts` и `goi logout` обращаются к control API, не удаляя рабочие данные.
+**dentry:** A directory-entry cache object connecting a name under a parent directory to an inode. Path lookup walks dentries.
 
-`goi/journal.py` хранит ID, исходную ревизию, права и полное содержимое файла.
-Перед mount CLI запускает демон и вызывает replay. Сервер проверяет ожидаемую
-ревизию либо совпадение байтов и прав. Ответ после commit позволяет удалить
-запись из журнала; при потере ответа повтор безопасен. При отличающейся новой
-ревизии локальная копия сохраняется для экспорта и ручного решения.
+**VFS:** Linux Virtual Filesystem: the common layer that routes ordinary file system calls to filesystem-specific operations.
+
+**super_block:** The kernel object describing one mounted filesystem instance, including its root, operations, and private backend state.
+
+**page cache:** Kernel memory pages containing file data. GOI loads remote bytes here and uses generic file helpers for reads and writes.
+
+**SQLite:** The service database holding working state. WAL and synchronous=FULL provide durable commits, subject to the underlying storage guarantees.
+
+**fsync:** A system call asking a filesystem to complete durable saving for a file. In GOI HTTP mode it saves to the main service; it does not publish to GitHub.
+
+**journal:** A local SQLite store of full-file snapshots retained until the main service acknowledges them. It is distinct from the publication-intent journal.
+
+**baseline:** The recorded version used to compare working files with their starting state and to perform three-way merges.
+
+**ref:** A Git reference, such as a branch name, pointing to a commit. Publication advances the branch ref after constructing Git objects.
+
+**revision:** A service-side change counter used for clean-cache invalidation and conditional journal recovery.
+
+**workqueue:** Kernel infrastructure for running callbacks in worker threads. GOI delayed work may sleep while waiting for HTTP or a mutex; it is not an interrupt handler or a new goi process.

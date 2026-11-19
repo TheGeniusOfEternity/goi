@@ -1,7 +1,7 @@
-# Изменения
+# Changelog
 
-## 0.1.0 — 20.11.2026
+## 0.1.0 — 2026-11-20
 
-Первое самостоятельное оформление GOI. Перенесены модуль ядра, Python-сервис,
-CLI, клиентский журнал, управление пользовательским systemd-сервисом и тесты.
-Сборка, CI и документация адаптированы к корню отдельного репозитория.
+Initial standalone project layout, including the kernel module, Python service,
+CLI, client journal, per-user systemd management, and tests.
+Build instructions, CI, and English documentation use the repository root.

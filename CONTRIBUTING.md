@@ -1,18 +1,19 @@
-# Разработка
+# Contributing
 
-Python 3.10+; сторонних Python-зависимостей нет.
+Use English for code comments, documentation, commit messages, and pull requests.
 
-```sh
+Python components require Python 3.10+ and no third-party dependencies.
+
+```bash
 make test
 make W=1
 ```
 
-Python-тесты используют подставной GitHub API и временные базы.
-Сборка требует заголовки поддерживаемого ядра. Модуль проверен на Linux
-7.0.0-43-generic ARM64; совместимость с другими версиями VFS не гарантируется.
-Ядровые тесты запускайте в отдельной VM; команды — в
-[DEVELOPMENT.md](DEVELOPMENT.md#тесты).
+Python tests use a GitHub fixture and temporary databases. The kernel module was
+verified on Linux 7.0.0-43-generic ARM64. Other VFS versions may need adaptation.
+Run kernel integration tests in a dedicated VM; see
+[the testing instructions](DEVELOPMENT.md#tests).
 
-Для изменения поведения добавьте проверку соответствующего сценария.
-В PR опишите изменение, результат проверки и ограничения окружения.
-Не добавляйте SQLite-базы, server-token, GitHub access tokens и файлы сборки.
+Add a regression check for behavior changes. Describe the change, verification,
+and environment limitations in your PR. Do not commit databases, server-token,
+GitHub access tokens, or generated build files.

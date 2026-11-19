@@ -1,337 +1,191 @@
-# GOI: запуск и проверка
+# Setup and command reference
 
-Сначала прочитать [путь одного файла от mount до commit](WALKTHROUGH.md).
-[Интерактивный конспект](docs/goi-guide.html): 15 этапов на интерактивной доске
-с масштабированием и перемещением узлов. По клику открываются пояснения
-и соответствующий исходный код с подсветкой; обе панели можно скрыть.
-Есть определения терминов и симулятор RAM → SQLite → GitHub.
-Открывается как самостоятельный HTML в браузере без сервера и зависимостей.
-[Обзор проекта](README.md), [HTTP-протокол](PROTOCOL.md).
+GOI consists of a C kernel module, a Python storage service, and a Python CLI.
+See [README](README.md), [the walkthrough](WALKTHROUGH.md), and
+[the HTTP protocol](PROTOCOL.md). The [interactive guide](docs/goi-guide.html)
+opens directly in a browser.
 
-Модуль ядра написан на C, сервис и CLI — на Python без сторонних библиотек.
-Проверенная платформа: Ubuntu 26.04 ARM64, Linux 7.0.0-38-generic, Python 3.14.
-Сигнатуры VFS зависят от версии ядра; совместимость других версий не проверена.
+## Requirements and build
 
-## Сборка и запуск
+Verified platform: Ubuntu ARM64, Linux 7.0.0-43-generic, Python 3.14.
+Python components require Python 3.10+ with no third-party libraries.
+The kernel module requires GCC, make, and matching kernel headers. Linux VFS
+interfaces change between versions; other kernels may require porting.
 
-Выполнять в Linux VM, из `.`. Нужны GCC/make, заголовки текущего
-ядра и Python ≥3.10. Сначала сделать снимок VM.
+Use a dedicated Linux VM for kernel development.
 
-```sh
+```bash
 make W=1
 export PATH="$PWD/bin:$PATH"
-source "$PWD/shell/goi.sh"   # Bash/Zsh: cd переключает ветку, goi switch меняет cwd.
+source "$PWD/shell/goi.sh"
 sudo insmod source/vtfs.ko
 ```
 
-Создать собственное OAuth App в GitHub → Settings → Developer settings → OAuth Apps,
-включить **Enable Device Flow** и взять Client ID. Client secret этому потоку не нужен.
+The shell integration supports Bash and Zsh. It wraps cd to synchronize branch
+transitions and makes goi switch change the current shell directory.
 
-Один раз настроить фоновый сервис обычным пользователем:
+## Authentication and local service
 
-```sh
-goi service install --client-id 'ваш_client_id'
+Create a GitHub OAuth App with Device Flow enabled. Use its Client ID;
+Device Flow does not require a client secret.
+
+```bash
+goi service install --client-id YOUR_CLIENT_ID
+goi mount ~/github
+goi auth ~/github
+# On a headless machine:
+goi auth ~/github --no-browser
 ```
 
-Обычный `goi mount` запускает локальный сервис и ждёт готовности HTTP.
-Пользовательский systemd запускает его также при входе и перезапускает после
-аварии. Отдельный терминал не нужен. Unit находится в
-`~/.config/systemd/user/goi.service` (учитывается XDG_CONFIG_HOME).
-Он содержит абсолютный путь к checkout: после перемещения репозитория повторить
-install с Client ID. После изменения Client ID выполнить `goi service restart`.
-Если unit ещё не создан, mount создаёт его; Client ID берётся из
-`GOI_GITHUB_CLIENT_ID`.
+The mount command creates its mountpoint and uses sudo for privileged mounting.
+It starts the default local service and waits for authenticated HTTP readiness.
+The service also starts at user login and restarts after failure.
 
-```sh
+The unit is stored in ~/.config/systemd/user/goi.service, respecting XDG_CONFIG_HOME.
+Its executable path is absolute: after moving the checkout, install again with
+the Client ID and restart. If the unit does not exist, mount creates it and uses
+GOI_GITHUB_CLIENT_ID from the environment. Startup before user login is not configured.
+
+```bash
 goi service status
+goi service restart
 journalctl --user -u goi -f
-# Сначала размонтировать используемые ФС:
+# Unmount before stopping the server:
 goi unmount ~/github
 goi service stop
-goi service disable   # отключить автозапуск при входе; mount всё ещё может запустить сервис
+goi service disable
 ```
 
-Это пользовательский сервис Linux, без sudo. Запуск до входа пользователя
-не настраивается. Основной сервис и отдельный клиентский демон журнала —
-разные процессы: журнал запускается для mount даже при удалённом основном сервере.
-У каждого пользователя на отдельной машине своя база и авторизация.
-На одной машине стандартный порт 8080 может занимать только один сервер.
+Disable prevents automatic startup at login; a later mount may still start the unit.
+The default service binds to 127.0.0.1:8080. Only one process can own that port
+on a machine. Separate machines can each run their own independent instance.
 
-Ручной запуск остаётся доступен (например, без пользовательского systemd):
+Service data is stored in ~/.local/share/goi. The directory is private (0700);
+the database and server-token use 0600. The GOI session token authenticates
+clients to this service. It is distinct from the GitHub access token stored by
+the service.
 
-```sh
-GOI_GITHUB_CLIENT_ID='ваш_client_id' ./bin/goi-server
-```
+## Manual or remote server
 
-Для такого запуска передать mount явный `--server http://127.0.0.1:8080`.
-Явные `--server` или `--token-file` отключают автоматическое управление сервисом
-для этой точки; выбор сохраняется вместе с настройками mount.
+```bash
+GOI_GITHUB_CLIENT_ID=YOUR_CLIENT_ID ./bin/goi-server \
+  --data "$HOME/.local/share/goi" --listen 127.0.0.1 --port 8080
 
-Данные сервиса находятся на диске в SQLite. Каталог имеет права 0700, база и
-`server-token` — 0600. GitHub access token хранится только на сервере. `server-token`
-используется для общения клиента с нашим сервисом; это другой токен.
-
-```sh
-goi mount /github
-goi auth /github
-```
-
-Путь точки монтирования обязателен: можно выбрать, например, `goi mount ~/github`.
-Без флагов используются настройки этого пути из `~/.config/goi/mounts.json`.
-При первом запуске: сервер `http://127.0.0.1:8080`, токен
-`~/.local/share/goi/server-token`, фоновое сохранение раз в секунду.
-Явные флаги переопределяют настройки и сохраняются для следующих запусков:
-
-```sh
+# In another terminal:
 goi mount ~/github --server http://127.0.0.1:8080 \
-  --token-file "$HOME/.local/share/goi/server-token" --autosync 0
-goi unmount ~/github
-# Повторный запуск использует те же настройки:
-goi mount ~/github
+  --token-file "$HOME/.local/share/goi/server-token"
 ```
 
-Для сервера на другой машине адрес и файл с его session token указываются один раз.
-Удалённый микросервис запускается отдельно. Для нестандартной точки auth и unmount тоже
-принимают путь: `goi auth ~/github`, `goi unmount ~/github`.
+An explicit --server or --token-file selects manual management for that mount.
+The selection is saved in ~/.config/goi/mounts.json, respecting XDG_CONFIG_HOME.
+Subsequent mounts reuse it. A remote service is started independently.
+Use a trusted network or an SSH tunnel: the kernel transport uses HTTP, not TLS.
 
-Каталог точки монтирования создаётся автоматически. Если для создания нужны
-права администратора, goi вызывает sudo mkdir, затем sudo mount. Владельцем
-смонтированной ФС становится пользователь, запустивший goi.
+Default mount settings are localhost:8080, the standard token file, autosync
+every second, a 256 MiB kernel file cache, and an enabled local write journal.
+Flags override and persist settings:
 
-До первого входа `ls /github` возвращает Permission denied. Команда goi auth
-доступна; после подтверждения входа появляется каталог пользователя.
+```bash
+goi mount ~/github --autosync 0 --cache-mib 512
+```
 
-Пользователи и организации находятся на одном уровне: `/github/<владелец>/<репозиторий>`.
-Доступ к организациям определяется токеном вошедшего пользователя.
-При обновлении старые контейнеры personal/orgs автоматически убираются из базы,
-репозитории и локальные изменения сохраняются. Старый контейнер branches также
-убирается: ветки перемещаются непосредственно в каталог репозитория. Перед обновлением нужно выполнить
-`goi unmount`, затем перезапустить сервис и снова смонтировать ФС.
+## Repository activation and editing
 
-Подставить свой логин и существующий репозиторий вместо `user`/`repo`:
+Before authentication, listing the mount root returns EACCES.
+Users and organizations appear directly below the mount root.
+Repository activation is explicit; listing other repositories does not download
+their file contents.
 
-```sh
-ls /github/user
-ls /github/organization
-goi activate /github/user/repo
-cd /github/user/repo/main
+```bash
+goi activate ~/github/YOUR_LOGIN/YOUR_REPO
+# Or, from the repository directory:
+goi activate
+cd ~/github/YOUR_LOGIN/YOUR_REPO/main
 cat README.md
 printf '\nHello from GOI\n' >> README.md
 goi sync README.md
 goi status
 goi diff
-goi commit README.md -m 'Update README'
-# goida README.md -m 'Update README' — короткая форма commit.
+goi commit README.md -m "Update README"
 ```
 
-`goi sync` сохраняет данные на нашем сервисе. `goi commit` действительно меняет
-ветку GitHub: для демонстрации использовать тестовый репозиторий. Без путей commit
-выбирает все изменения; каталог означает изменения внутри него. Переименования и
-удаления тоже публикуются. Между ветками rename возвращает EXDEV.
+Create a first commit on GitHub before activating an empty repository.
+Each branch is a directory; slash characters in branch names become %2F.
+Metadata is stored in .info.json; conflict copies are under .goi/commit/changes.
+The .git entry prevents ordinary Git from treating GOI as a normal worktree.
 
-Служебная информация репозитория хранится в скрытом файле `.info.json` (виден через `ls -a`).
-Репозитории неактивны до `goi activate`. Для пустого репозитория сначала нужно
-создать первый коммит на GitHub (например, README.md), затем повторить активацию.
-Создание первого коммита в пустом репозитории через GOI пока не поддерживается. Каталоги загружаются при обращении,
-содержимое — при открытии одного файла. Slash в имени ветки кодируется как `%2F`.
-В branch-каталоге обычные файлы лежат прямо в корне; `.git` блокирует обычный Git.
-Скрытая `.goi/commit` содержит `message` и `changes` для конфликтов.
+Sync saves to the service; commit publishes to GitHub. Without paths, commit
+selects all non-ignored changes. A directory selects changes below it.
+Deletions and renames are included; rename across branches returns EXDEV.
+The goida alias invokes goi commit.
 
-Если уже находишься в каталоге репозитория, достаточно `goi activate` без пути.
-Путь можно указать явно:
-`goi activate /github/user/repo`. Кавычки нужны только для пробелов
-и специальных символов shell в пути.
+## Branches and caches
 
-## Переключение веток и RAM
-
-После подключения `shell/goi.sh` обычный `cd` в ветку или вложенный каталог
-вызывает переключение до изменения текущей директории. При ошибке сохранения
-shell остаётся в прежнем каталоге. Переходы за пределами GOI работают как обычно.
-
-```sh
-goi switch feature/vfs   # Перейти в корень feature%2Fvfs.
-cd ../main/src          # Переключиться на main и перейти в её src.
+```bash
+goi switch main
+cd ../feature%2Fexample/src
+goi cache
+goi cache --clear
 ```
 
-Также можно передать абсолютный путь к ветке или путь с `./` / `../`.
-Для постоянного подключения добавить export PATH и source с абсолютными путями
-в `~/.bashrc` или `~/.zshrc`. Без shell-интеграции команда лишь переключает кеш
-и печатает путь: отдельная программа не может изменить cwd родительского shell.
+With shell integration, cd into another branch synchronizes first and asks the
+kernel to release clean, closed files from other branches. Open files and mmap
+references keep their data alive. The CLI alone cannot change its parent shell's
+directory; the shell wrapper performs that final step.
 
-Переключение сначала сохраняет изменения на сервисе, не создавая GitHub-коммит.
-Затем освобождает содержимое закрытых файлов других веток. Открытые файлы и mmap
-сохраняются до закрытия; несохранённые данные не удаляются. Метаданные остаются.
-Возврат загружает файлы из SQLite сервиса. Ветка для кеширования одна на mount,
-последнее переключение из любого терминала выбирает её; остальные пути доступны.
-В IDE без shell-хука нужно вызвать goi switch явно.
+The server LRU cache defaults to 256 MiB; change it with goi-server --cache-mib.
+Eviction removes reproducible clean blobs, preserving local edits, conflicts,
+and unfinished publications. This limit is not a bound on the physical database
+size or on all working data.
 
-Новые репозитории, созданные на GitHub после загрузки списка, подхватываются явно:
+The kernel cache quota applies to file pages, not inode/dentry metadata or
+temporary buffers. Dirty or open files are protected; allocation may return ENOSPC
+when eligible pages cannot be released.
 
-```sh
-cd /github/user
+## Refresh, restore, and conflicts
+
+```bash
 goi refresh
-ls
-# Новые организации:
-cd /github
-goi refresh
-ls
+goi restore README.md
+goi restore src/
 ```
 
-Обновление списка добавляет новые записи, сохраняя активированные репозитории и
-локальные изменения. Уже известные репозитории не удаляются автоматически.
+Refresh updates clean files and merges independent text edits. Locally changed
+directory subtrees are preserved and reported. Ambiguous changes produce conflicts;
+file/directory type collisions roll back the refresh. Restore discards selected
+changes back to their recorded baseline, including deletions and renames.
 
-## Конфликты и обновление
+Conflict markers are written to a separate copy. The working file is preserved
+until resolution:
 
-Если commit сообщает о конфликте:
-
-```sh
+```bash
 $EDITOR .goi/commit/changes/README.md
 goi sync .goi/commit/changes/README.md
 goi resolve README.md
-# Переоткрыть рабочий README.md, затем:
-goi commit README.md -m 'Resolve conflict'
+# Reopen the working file before using it:
+goi commit README.md -m "Resolve conflict"
 ```
 
-Маркеры должны быть удалены. Для бинарных файлов и конфликтов удаления есть
-`goi resolve path --ours` / `--theirs`. Пока resolve не подтверждён, оригинал не меняется.
-Независимые изменения строк объединяются трёхсторонним слиянием
-(исходная версия, локальная, удалённая). Пересекающиеся изменения, бинарные файлы,
-удаления и неоднозначные вставки требуют явного разрешения.
+Alternatively, goi resolve README.md --ours or --theirs selects a side.
+Reopen files after refresh, restore, or resolve to obtain the new contents.
 
-`goi refresh` обновляет чистые файлы и пытается объединить изменённые. Локальные
-каталоги сохраняются. Поддеревья созданных, переименованных и удалённых каталогов
-остаются локальными; команда перечисляет их отдельно. При несовместимой смене
-типа файл/каталог обновление откатывается с ошибкой. Refresh явно обходит всё
-удалённое дерево метаданных; содержимое чистых файлов остаётся ленивым.
-После refresh переоткройте файлы в редакторе.
+Publication intent is stored before changing the GitHub ref. On restart, the
+next commit, or goi recover, the service checks whether that SHA was published
+and can finish the update while preserving subsequent local edits.
 
-### Отмена локальных изменений
-
-```sh
-goi status                 # читаемый список, включая каталоги
-goi status --json          # прежний формат для скриптов
-goi restore README.md      # отменить правки или удаление файла
-goi restore renamed.txt    # вернуть переименованный файл на исходный путь
-goi restore local-dir     # отменить изменения каталога и его потомков
-```
-
-Restore удаляет выбранные неопубликованные изменения, включая новые файлы.
-Восстанавливается записанная исходная версия, а не обязательно последний HEAD
-GitHub. Неуказанные файлы сохраняются. Конфликт выбранного файла также отменяется.
-Перед командой CLI синхронизирует RAM с сервисом; после неё нужно переоткрыть
-затронутые файлы. Не редактируйте их одновременно из другого процесса.
-
-### Восстановление публикации
-
-Перед обновлением GitHub ref сервис сохраняет намерение публикации в SQLite:
-исходный HEAD, SHA созданного коммита и версии выбранных файлов. После перезапуска
-сервиса и перед следующим commit выполняется восстановление. Если ref ещё не
-обновлён и HEAD не изменился, повторяется обновление того же SHA. Если коммит уже
-в ветке, локальное состояние подтверждается без второго коммита; новые локальные
-правки сохраняются. Проверка истории ограничена 128 первыми родителями.
-
-```sh
+```bash
 goi recover
-# Только после проверки GitHub, если автоматическое восстановление невозможно:
+# Only after inspecting the outcome:
 goi recover --forget
 ```
 
-`--forget` удаляет запись о намерении публикации, сохраняя локальные изменения.
-После этого следующий commit заново проверяет удалённое состояние. Для удаления
-последнего файла используется Contents API: сервис распознаёт завершение по
-пустому дереву, но не повторяет неоднозначное удаление автоматически.
+Forget removes publication intent without reverting working files.
+Recovery examines up to 128 first-parent commits. An ambiguous deletion of the
+last file is not retried automatically. Ref updates are not forced.
 
-Журнал публикаций дополняется клиентским журналом записей, включённым по умолчанию
-в `goi mount`. Микросервис рассчитан на одного писателя рабочей копии.
+## Ignore rules and accounts
 
-## Завершение и другой сервер
-
-```sh
-cd /tmp
-goi unmount /github
-sudo rmmod vtfs
-```
-
-`goi unmount` сначала дожидается сохранения файлов. Фоновая синхронизация по умолчанию
-работает раз в секунду; `goi mount --autosync 0` отключает её. Обычный close не является
-подтверждением сохранения на основном сервисе; при включённом журнале успешный
-write уже подтверждает локальную долговечную копию.
-
-На другой машине запускается тот же Python-сервис с SQLite на долговечном диске.
-Адрес IPv4 задаётся через `--server`. Можно использовать SSH-туннель:
-
-```sh
-ssh -N -L 8080:127.0.0.1:8080 user@server
-```
-
-Либо сервис слушает адрес приватной ZeroTier-сети через `--listen`. Session token
-передать отдельно и сохранить на клиенте с 0600. HTTP сам не шифрует трафик.
-
-## Тесты
-
-Из корня репозитория проверки сервиса и HTTP-адаптера запускаются так:
-
-```sh
-make test
-```
-
-Это те же тесты, что в GitHub Actions: нужны Python и make, токен GitHub не нужен.
-HTTP-запросы идут к локальному тестовому серверу. Если Actions не запускает jobs
-из-за ограничений аккаунта, локальный прогон проверяет код независимо от Actions;
-само ограничение аккаунта исправлением workflow не снимается.
-
-Для проверок ядра перейдите в корень проекта и соберите модуль:
-
-```sh
-make W=1
-# Следующие команды — только в выделенной VM, vtfs заранее выгружен:
-sudo bash test/run-vm-tests.sh
-sudo python3 -B test/test_remote.py
-```
-
-Без root на хосте можно проверить настоящий модуль в отдельной ARM64 QEMU VM:
-
-```sh
-python3 -B test/run_qemu.py --kernel /path/to/matching/uncompressed/Image \
-  --qemu qemu-system-aarch64 --timeout 600 --crash-test --log /tmp/goi-qemu.log
-```
-
-В `--kernel` нужен именно распакованный ARM64 Image. EFI/compressed vmlinuz
-из /boot напрямую не подходит; скрипт проверяет сигнатуру и объясняет ошибку
-до запуска QEMU. Версия Image должна совпадать с заголовками сборки модуля.
-
-Для `--crash-test` также нужны mkfs.ext4 и ядро с ext4/virtio-blk.
-Тест принудительно завершает VM до fsync и восстанавливает запись при следующем
-запуске с тем же виртуальным диском. Хостовые файловые системы не монтируются.
-
-Нужны qemu-system-aarch64, busybox-static, cpio, Git для проверки ловушки, Python 3.14 и ядро,
-совпадающее с собранным модулем. Скрипт использует временный initramfs и не загружает
-модуль в ядро хоста. Исторические результаты учебной версии доступны в
-[os-course](https://github.com/TheGeniusOfEternity/os-course/tree/lab-vtfs/lab/vtfs/test/results).
-
-## Кеш микросервиса
-
-По умолчанию сервис хранит до 256 МиБ скачанных чистых файлов. Лимит задаётся
-при запуске сервера, например `goi-server --cache-mib 512` вместе с обычными
-параметрами запуска. `--cache-mib 0` отключает хранение скачанных копий.
-Внутри любой папки смонтированной ФС:
-
-```sh
-goi cache          # объём воспроизводимого кеша и лимит в байтах
-goi cache --clear  # очистить этот кеш во всём сервисе, включая другие mount
-```
-
-Удаляются сначала давно прочитанные копии. При следующем чтении сервис скачивает
-их по прежнему SHA; имена, размеры и ревизии файлов остаются прежними.
-Локальные изменения, новые файлы, конфликты и ветки с незавершённой публикацией
-не удаляются и не входят в этот лимит. Это не квота всей SQLite или RAM ядра.
-SQLite повторно использует освободившиеся страницы: файл базы на диске сразу
-не уменьшается. При лимите меньше размера файла повторные чтения его частей
-могут повторно скачивать весь blob; для обычной работы лучше оставить минимум 64 МиБ.
-
-## Исключения и аккаунты
-
-В корне ветки можно создать `.goiignore`, например:
+Create .goiignore at the branch root:
 
 ```text
 build/
@@ -340,86 +194,110 @@ node_modules/
 !important.log
 ```
 
-Поддерживаются `*`, `?`, классы `[abc]`, комментарии `#`, отрицание `!`,
-завершающий `/` для каталога и начальный `/` для привязки к корню.
-`*` не пересекает `/`; `**` и escape-последовательности Git не реализованы.
-Правила применяются сверху вниз, последнее совпадение определяет результат.
-По умолчанию исключены `*.swp`, `*.swx`, `*~`, `4913`, `__pycache__/`, `*.pyc`.
-Исключения влияют на status/diff/commit только для новых неопубликованных объектов.
-Уже отслеживаемые файлы, их удаления и переименования всегда учитываются.
-Файлы остаются видимыми и сохраняются на сервисе; это не способ экономить RAM.
+Supported syntax: *, ?, character classes, # comments, ! negation, a trailing /
+for directories, and a leading / to anchor a pattern. The last matching rule wins.
+A star does not cross /; Git's ** and escaping syntax are not implemented.
+Default rules cover *.swp, *.swx, *~, 4913, __pycache__/, and *.pyc.
 
-```sh
+Rules affect only unpublished additions in status/diff/commit. Tracked files,
+their deletions, and their renames remain visible. Ignored files remain in the
+filesystem and are still saved to the service.
+
+```bash
 goi status --ignored
-goi commit --force build/result.txt -m 'Publish this artifact explicitly'
-goi accounts                 # Client ID, логины, состояние входа; без токенов
-goi logout my-login          # сначала sync, затем удалить токен из сервиса
-goi auth /github             # повторный вход сохранит рабочие файлы и активации
+goi status --json
+goi commit --force build/result.txt -m "Publish artifact"
+goi accounts
+goi logout YOUR_LOGIN
+goi auth ~/github
 ```
 
-Logout не удаляет рабочие копии и не закрывает локальный доступ к уже сохранённым
-данным. Он также не отзывает OAuth-разрешение на сайте GitHub. Скачивание новых
-данных и публикация требуют повторного входа.
+Logout synchronizes first and removes the stored GitHub token. It preserves
+working data and activation state; it does not revoke the OAuth grant on GitHub
+or block access to previously stored local data.
 
-## Память клиента и журнал
+## Local write journal
 
-Обычный `goi mount <путь>` автоматически запускает локальный процесс журнала
-на loopback. Основной микросервис по-прежнему запускается отдельно и может
-находиться на другой машине. Настройки сохраняются для точки монтирования:
+The client journal is a separate local Python process even when the main service
+is remote. By default, a successful write records a full-file snapshot with
+SQLite FULL durability before returning to the application. Fsync sends the
+snapshot to the main service and acknowledges the journal after success.
 
-```sh
-goi mount ~/github --cache-mib 256 --journal
-# Явный режим без защиты записей до fsync:
-goi mount ~/github --no-journal
-```
+The journal holds up to 512 MiB of unacknowledged snapshots. Small edits to large
+files are expensive because the whole file is recorded. Full capacity returns
+ENOSPC. Disabling it with --no-journal leaves writes before fsync only in RAM.
 
-Лимит 1..4096 МиБ относится к содержимому файлов в page cache HTTP-mount,
-включая открытые и изменённые файлы. При нехватке места освобождаются чистые
-закрытые файлы любых веток. Если места всё равно нет, open/write/truncate
-возвращают ENOSPC: синхронизируй и закрой лишние файлы либо увеличь лимит.
-Метаданные inode/dentry и временные буферы размером до 64 МиБ считаются отдельно.
-
-При каждом успешном write и изменении размера/прав файла модуль отправляет полную
-копию в локальный процесс журнала. Ответ приходит после SQLite commit с
-`synchronous=FULL`. fsync/autosync отправляет копию основному сервису и только
-после его подтверждения удаляет запись журнала. Если локальная запись не удалась,
-системный вызов возвращает ошибку; RAM могла измениться, но подтверждения сохранения нет.
-Это простой, но затратный вариант: маленькая правка большого файла переписывает
-весь файл. До 512 МиБ неподтверждённых копий; переполнение возвращает ENOSPC.
-Обычный mount восстанавливает журнал до монтирования, без коммита на GitHub.
-
-```sh
+```bash
 goi journal status
 goi journal export --output ~/goi-rescue
-# Следующие операции — после unmount, с явной точкой:
+goi unmount ~/github
 goi journal recover --mountpoint ~/github
-# Только после сохранения нужной копии: удалить конкретную запись журнала
+# Only after preserving any needed copy:
 goi journal discard --mountpoint ~/github --id 123
 ```
 
-Экспорт создаёт файлы с числовыми ID и правами 0600, исходные записи сохраняет.
-Статус показывает ID, исходную ревизию и размер. Восстановление проверяет ревизию
-на основном сервисе: совпадающее содержимое подтверждается повторно без новой
-записи; другое содержимое с новой ревизией возвращает ESTALE и сохраняет журнал.
-Переименование/удаление, завершившееся до аварии, тоже может потребовать ручного
-разбора. Неоднозначные записи можно экспортировать и затем явно отбросить.
-Повторно смонтировать можно после разрешения таких записей; `--no-journal`
-отключает автоматическое восстановление и защиту новых записей.
+Export creates private files named by object ID and retains journal entries.
+Replay checks the expected server revision; identical data and mode allow an
+idempotent acknowledgement. A different newer revision returns ESTALE and retains
+the snapshot for manual recovery. Completed renames or deletions may also need
+manual inspection.
 
-Журнал находится в `~/.config/goi/journals/<идентификатор-mount>/` (или в
-`$XDG_CONFIG_HOME/goi/journals/`), с приватными правами. Демон держит flock от
-двойного запуска; после перезапуска использует прежний порт. Привязка к адресу
-сервера и хешу session token предотвращает отправку старых ID в другую базу.
-Для смены сервера/токена используй новую точку mount или, после сохранения всех
-данных, отдельную новую конфигурацию. Данные журнала должны находиться на
-долговечном локальном диске. Создание, удаление и rename по-прежнему требуют
-доступного основного сервиса: полноценного offline-режима нет.
+Journals live under ~/.config/goi/journals/ (or XDG_CONFIG_HOME). A lock prevents
+duplicate daemons, and restarts reuse the previous port. Each journal is bound
+to its backend address and token hash. Use a new mount configuration when changing
+backends, or preserve and resolve pending data first. Journal storage must be on
+a durable local disk. Metadata operations still require the main service.
 
-## Ограничения
+## Unmounting
 
-Файл ограничен 64 МиБ; при fsync и записи в журнал создаётся буфер размером с файл.
-Квота page cache HTTP-mount по умолчанию 256 МиБ; метаданные и временные буферы в неё не входят. Shared writable mmap в HTTP-режиме запрещён, чтобы не обойти
-обычную запись. RAM-режим теряет данные после unmount, его fsync возвращает EOPNOTSUPP.
-Жёсткие/символические ссылки, issues/PR, подмодули и создание веток не реализованы.
-Защищённые ветки консервативно read-only, разрешения GitHub окончательно проверяются
-при push. Полные POSIX-права и пустые каталоги остаются метаданными своего сервиса.
+```bash
+cd ~
+goi unmount ~/github
+sudo rmmod vtfs
+```
+
+Unmount synchronizes before invoking umount. Sync failure or open references can
+prevent unmounting. Module unloading is separate and requires unused mounts.
+Neither operation publishes a GitHub commit. The main service remains running.
+
+## Tests
+
+```bash
+make test
+make W=1
+```
+
+Python tests use temporary databases and a controlled GitHub fixture, without
+GitHub credentials. CI runs these tests on Python 3.12 and 3.14.
+
+For kernel tests in a dedicated compatible VM, start with vtfs unloaded:
+
+```bash
+sudo bash test/run-vm-tests.sh
+sudo python3 -B test/test_remote.py
+```
+
+The ARM64 QEMU runner avoids loading the module into the host kernel:
+
+```bash
+python3 -B test/run_qemu.py --kernel /path/to/matching/uncompressed/Image \
+  --qemu qemu-system-aarch64 --timeout 600 --crash-test --log /tmp/goi-qemu.log
+```
+
+It requires qemu-system-aarch64, busybox-static, cpio, Git, Python 3.14, and a
+kernel matching the module. Pass an uncompressed ARM64 Image, not EFI/compressed
+vmlinuz. Crash testing also requires mkfs.ext4 and ext4/virtio-blk support.
+The runner terminates a VM before fsync, then recovers with the same virtual disk.
+
+## Limits
+
+One writer per working state. Store operations use a shared lock, including some
+GitHub calls, so a slow network request can delay other operations.
+Files are limited to 64 MiB; fsync and journaling allocate whole-file buffers.
+Shared writable mmap is rejected in HTTP mode.
+
+The RAM-only backend loses data on unmount and returns EOPNOTSUPP for fsync.
+Hard links, symbolic links, issues/PR views, submodules, branch creation, and the
+first commit of an empty repository are not implemented. Protected branches are
+conservatively read-only. GitHub permissions are checked again at publication.
+Full POSIX permissions and empty directories remain service metadata.

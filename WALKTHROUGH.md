@@ -1,6 +1,6 @@
 # From mount to commit
 
-See the [interactive guide](docs/goi-guide.html) for a navigable diagram and source excerpts.
+This walkthrough follows a file from mounting through publication, with links to the implementation.
 
 ## 1. Build and load
 

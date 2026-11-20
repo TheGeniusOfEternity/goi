@@ -2,8 +2,7 @@
 
 GOI consists of a C kernel module, a Python storage service, and a Python CLI.
 See [README](README.md), [the walkthrough](WALKTHROUGH.md), and
-[the HTTP protocol](PROTOCOL.md). The [interactive guide](docs/goi-guide.html)
-opens directly in a browser.
+[the HTTP protocol](PROTOCOL.md).
 
 ## Requirements and build
 

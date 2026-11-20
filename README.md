@@ -174,7 +174,6 @@ Project documentation, code comments, and contributions are maintained in Englis
 - [Setup and command reference](DEVELOPMENT.md)
 - [From mount to commit](WALKTHROUGH.md)
 - [HTTP protocol](PROTOCOL.md)
-- [Interactive architecture guide](docs/goi-guide.html)
 
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)

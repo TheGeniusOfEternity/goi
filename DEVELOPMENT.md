@@ -20,8 +20,9 @@ source "$PWD/shell/goi.sh"
 sudo insmod source/vtfs.ko
 ```
 
-The shell integration supports Bash and Zsh. It wraps cd to synchronize branch
-transitions and makes goi switch change the current shell directory.
+The shell integration supports Bash and Zsh. It wraps cd and ls to activate only explicitly addressed repositories. The cd
+wrapper also synchronizes branch transitions, and goi switch changes the current
+shell directory.
 
 ## Authentication and local service
 
@@ -92,8 +93,12 @@ goi mount ~/github --autosync 0 --cache-mib 512
 
 Before authentication, listing the mount root returns EACCES.
 Users and organizations appear directly below the mount root.
-Repository activation is explicit; listing other repositories does not download
-their file contents.
+Repository activation is explicit for filesystem clients such as IDEs. The
+sourced cd/ls wrappers activate the repository addressed by a path, including
+a nested path into an inactive branch. Listing the mount root or owner directory
+does not activate its children. command ls bypasses the wrapper; ls -d also skips
+activation. Unknown GNU ls options fall back without activation. These hooks
+only run as shell functions, never from filesystem lookup or directory listing.
 
 ```bash
 goi activate ~/github/YOUR_LOGIN/YOUR_REPO

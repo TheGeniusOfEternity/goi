@@ -46,7 +46,7 @@ Implementation: [goi/cli.py](goi/cli.py), [goi/server.py](goi/server.py), [goi/g
 
 ## 5. Activate a repository
 
-Explicit activation retrieves branches. Each branch is a directory. Other repositories remain inactive; directory discovery does not eagerly fetch every blob.
+Explicit activation retrieves branches. Shell cd/ls wrappers also activate the single repository addressed by a path, before resolving nested branch directories. IDE lookups and owner listings do not trigger activation. Each branch is a directory. Other repositories remain inactive; directory discovery does not eagerly fetch every blob.
 
 ```bash
 goi activate ~/github/YOUR_LOGIN/YOUR_REPO

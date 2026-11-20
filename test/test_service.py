@@ -561,6 +561,89 @@ class ServiceTests(unittest.TestCase):
             self.assertFalse(saved["managed_local"])
             ensure_service.assert_called_once()
 
+    def test_shell_ls_operands_do_not_activate_option_values(self):
+        from goi.shell import ls_paths
+        self.assertEqual(ls_paths([]), ['.'])
+        self.assertEqual(ls_paths(['-al', '--color=auto', 'repo one', 'repo2']),
+                         ['repo one', 'repo2'])
+        self.assertEqual(ls_paths(['--hide', 'repo', '-Iother', '-w', '80']), ['.'])
+        self.assertEqual(ls_paths(['--', '-repo']), ['-repo'])
+        for args in (['-ld', 'repo'], ['--directory', 'repo'], ['--help'],
+                     ['--unknown', 'repo'], ['--ignore']):
+            self.assertEqual(ls_paths(args), [])
+
+    def test_shell_activation_only_targets_explicit_mounted_repositories(self):
+        from goi.shell import prepare
+        mount = Path(self.temp.name) / 'mount'
+        repo = mount / 'alice/demo'
+        repo.mkdir(parents=True)
+        config = {str(mount): {}}
+        client = Mock()
+        with patch.object(cli, 'configurations', return_value=config), \
+             patch.object(cli, 'Client', return_value=client), \
+             patch('goi.shell.os.path.ismount', return_value=True):
+            prepare('ls', [str(mount / 'alice')])
+            client.call.assert_not_called()
+            prepare('ls', ['-l', str(repo), str(repo / 'main/src')])
+            client.call.assert_called_once_with('activate', path='alice/demo')
+            client.reset_mock()
+            prepare('cd', [str(repo / 'main/src')])
+            client.call.assert_called_once_with('activate', path='alice/demo')
+            client.reset_mock()
+            with patch('goi.shell.os.path.ismount', return_value=False):
+                prepare('cd', [str(repo)])
+            client.call.assert_not_called()
+
+    def test_bash_wrappers_activate_before_nested_cd_and_keep_failed_cwd(self):
+        root = Path(self.temp.name) / 'shell'
+        root.mkdir()
+        executable = root / 'goi'
+        executable.write_text("""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+base = Path(os.environ['SHELL_TEST_ROOT'])
+if args[:1] == ['_shell']:
+    (base / 'repo/main/src').mkdir(parents=True, exist_ok=True)
+elif args[:1] == ['switch'] and (base / 'fail').exists():
+    sys.exit(1)
+""")
+        executable.chmod(0o755)
+        shell_file = Path(__file__).resolve().parents[1] / 'shell/goi.sh'
+        script = r'''set -eu
+shopt -s expand_aliases
+alias ls='ls --color=auto'
+source "$GOI_SHELL_FILE"
+cd "$SHELL_TEST_ROOT/repo/main/src"
+test "$PWD" = "$SHELL_TEST_ROOT/repo/main/src"
+ls -la -- "$SHELL_TEST_ROOT/repo" >/dev/null
+touch "$SHELL_TEST_ROOT/fail"
+if cd "$SHELL_TEST_ROOT"; then exit 21; fi
+test "$PWD" = "$SHELL_TEST_ROOT/repo/main/src"
+rm "$SHELL_TEST_ROOT/fail"
+cd "$SHELL_TEST_ROOT"
+cd - >/dev/null
+test "$PWD" = "$SHELL_TEST_ROOT/repo/main/src"
+'''
+        result = subprocess.run(['bash', '-c', script], cwd=root,
+                                env={**os.environ, 'PATH': str(root) + ':' + os.environ['PATH'],
+                                     'GOI_SHELL_FILE': str(shell_file), 'SHELL_TEST_ROOT': str(root)},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_shell_cdpath_activation_preserves_search_order(self):
+        from goi.shell import prepare
+        mount = Path(self.temp.name) / 'mount'
+        repo = mount / 'alice/demo'
+        repo.mkdir(parents=True)
+        client = Mock()
+        with patch.object(cli, 'configurations', return_value={str(mount): {}}), \
+             patch.object(cli, 'Client', return_value=client), \
+             patch('goi.shell.os.path.ismount', return_value=True), \
+             patch.dict(os.environ, {'GOI_CDPATH': str(mount / 'alice')}):
+            prepare('cd', ['demo/main/src'])
+            client.call.assert_called_once_with('activate', path='alice/demo')
+
     def test_binary_save_and_restart(self):
         node = self.file("binary")
         payload = bytes(range(256)) * 500

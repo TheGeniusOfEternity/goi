@@ -124,6 +124,9 @@ def switch_branch(directory):
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
+    item = commands.add_parser("_shell", help="internal shell navigation hook")
+    item.add_argument("kind", choices=("cd", "ls"))
+    item.add_argument("arguments", nargs=argparse.REMAINDER)
     item = commands.add_parser("service", help="manage the local per-user systemd service")
     item.add_argument("action", choices=("install", "start", "stop", "restart", "status", "disable"))
     item.add_argument("--client-id", help="OAuth App ID to persist when installing the service")
@@ -186,6 +189,13 @@ def main(argv=None):
         argv.insert(0, "commit")
     args = parser().parse_args(argv)
     try:
+        if args.command == "_shell":
+            from .shell import prepare
+            arguments = args.arguments
+            if arguments[:1] == ["--"]:
+                arguments = arguments[1:]
+            prepare(args.kind, arguments)
+            return 0
         if args.command == "service":
             require(args.client_id is None or args.action == "install", message="--client-id is only valid with service install")
             if args.action == "install":

@@ -1,4 +1,4 @@
-# Source this file from Bash or Zsh after adding lab/vtfs/bin to PATH.
+# Source this file from Bash or Zsh after adding goi/bin to PATH.
 # A shell function is needed because a child process cannot change our cwd.
 
 goi() {
@@ -18,8 +18,19 @@ goi() {
 
 cd() {
     local goi_destination
-    # Resolve in a subshell first: failed saving must leave this shell's cwd alone.
-    goi_destination=$(builtin cd "$@" >/dev/null && builtin pwd -P) || return $?
+    # First try normal shell resolution (including CDPATH and cd -).
+    if goi_destination=$(builtin cd "$@" 2>/dev/null >/dev/null && builtin pwd -P); then
+        command goi _shell cd -- "$goi_destination" || return $?
+    else
+        GOI_CDPATH="${CDPATH-}" GOI_OLDPWD="${OLDPWD-}" command goi _shell cd -- "$@" || return $?
+        goi_destination=$(builtin cd "$@" >/dev/null && builtin pwd -P) || return $?
+    fi
+    # A failed save must leave the current shell's cwd unchanged.
     command goi switch --from-cd "$goi_destination" || return $?
     builtin cd "$@"
+}
+
+function ls {
+    command goi _shell ls -- "$@" || return $?
+    command ls "$@"
 }

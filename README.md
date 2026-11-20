@@ -10,7 +10,7 @@ a Python storage service and command-line interface.
 ## Features
 
 - **Browser authentication** through GitHub OAuth Device Flow.
-- **Lazy loading:** activate a repository explicitly, then fetch directory
+- **Lazy loading:** activate a repository explicitly or through shell navigation, then fetch directory
   listings and file contents as they are accessed.
 - **Branches as directories**, with users and organizations at the same level.
 - **Regular filesystem operations:** read, write, create, delete, and rename files.
@@ -114,6 +114,23 @@ cd ~
 goi unmount ~/github
 ```
 
+## Shell navigation
+
+After sourcing shell/goi.sh, cd and ls activate only repositories named by the
+requested path. Nested paths work before activation:
+
+```bash
+cd ~/github/YOUR_LOGIN/YOUR_REPO/main/src
+ls ~/github/YOUR_LOGIN/YOUR_REPO
+```
+
+Listing an owner directory does not activate its repositories. IDE filesystem
+access remains passive; use goi activate before opening an inactive project in
+an IDE. Use command ls to bypass the shell hook. ls -d only displays directory
+entries and does not activate them. File contents are still fetched on open.
+The hooks support Bash/Zsh cd and GNU ls options; unknown ls options fall back
+to the original command without autoactivation.
+
 ## Background service
 
 ```bash
@@ -146,7 +163,7 @@ make test
 make W=1
 ```
 
-The suite contains **68 Python tests** using a controlled GitHub API fixture.
+The suite contains **72 Python tests** using a controlled GitHub API fixture.
 Kernel integration tests run separately in a compatible VM. The ARM64 QEMU
 runner also supports a crash-and-recovery scenario with a persistent virtual disk.
 

@@ -87,7 +87,8 @@ class RemoteTests(unittest.TestCase):
         self.mount_fs()
         self.addCleanup(lambda: subprocess.run(["umount", str(self.mount)], check=True))
         self.repo = self.mount / "alice/demo"
-        self.cli("activate", str(self.repo), cwd=self.mount)
+        if not self._testMethodName.startswith("test_shell_lazy_"):
+            self.cli("activate", str(self.repo), cwd=self.mount)
         self.branch = self.repo / "main"
 
     def test_mount_cli_starts_journal_and_reports_pending_writes(self):
@@ -310,6 +311,37 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(mapped_path.read_bytes(), b"int main(void) { return 0; }\n")
         self.assertEqual(self.server.file_reads, before_reads + 2)
         self.assertEqual(self.github.blob_reads, before_blobs)  # Reloaded from SQLite, not GitHub.
+
+    def check_lazy_shell(self, operation):
+        repo = self.store.resolve_path('alice/demo')
+        # Ordinary filesystem access (as used by an IDE) must not activate.
+        list(self.repo.iterdir())
+        subprocess.run(['ls', str(self.repo)], check=True, capture_output=True)
+        self.assertFalse(self.store.repo(repo['id'])['active'])
+        script = r'''set -eu
+export PATH="$GOI_LAB/bin:$PATH"
+alias ls='ls --color=auto'
+. "$GOI_LAB/shell/goi.sh"
+ls "$GOI_MOUNT/alice" >/dev/null
+command goi _shell ls --directory "$GOI_REPO"
+'''
+        if operation == 'cd':
+            script += 'cd "$GOI_REPO/main/src"\ntest "$PWD" = "$GOI_REPO/main/src"\n'
+        else:
+            script += 'ls -l "$GOI_REPO/main/src" >/dev/null\n'
+        result = subprocess.run(['bash', '-c', script], cwd=self.root,
+                                env={**os.environ, 'GOI_LAB': str(LAB),
+                                     'GOI_MOUNT': str(self.mount), 'GOI_REPO': str(self.repo)},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.store.repo(repo['id'])['active'])
+        self.assertEqual(self.github.blob_reads, 0)
+
+    def test_shell_lazy_cd(self):
+        self.check_lazy_shell('cd')
+
+    def test_shell_lazy_ls(self):
+        self.check_lazy_shell('ls')
 
     def test_shell_cd_switch_and_failed_save(self):
         script = r'''
